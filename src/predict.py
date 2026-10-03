@@ -1,34 +1,23 @@
 """
-SiagaChat URL Predictor
+SiagaChat predictor.
 
-Prediction pipeline:
+    python -m src.predict
 
-    URL
-     ↓
-    extract_features()
-     ↓
-    DataFrame dengan FEATURE_NAMES
-     ↓
-    Load model + scaler
-     ↓
-    predict_proba()
-     ↓
-    Risk score
-     ↓
-    Human-readable explanation
+Final score = ML model score, adjusted by transparent rules:
 
-Model package dibuat oleh src.train:
-    {
-        "model": model,
-        "scaler": scaler
-    }
+    official Indonesian domain (config)      -> capped low
+    popular domain (Tranco top 10k, bare)    -> capped low
+    .go.id / .mil.id                         -> capped low
+    imitates an Indonesian brand             -> raised to Bahaya
+    IP address / URL shortener               -> raised to at least Waspada
 
-Feature schema dibaca dari metadata JSON.
+The URL is never opened or downloaded. Only its text is analysed.
 """
 
 from __future__ import annotations
 
 import json
+from functools import lru_cache
 from pathlib import Path
 
 import joblib
@@ -36,514 +25,234 @@ import pandas as pd
 
 from src.features import (
     FEATURE_NAMES,
-    extract_features,
+    analyze_brand,
     explain_features,
+    extract_features,
+    has_trusted_suffix,
+    parse_url,
 )
-
-
-# ============================================================
-# PATH
-# ============================================================
 
 BASE_DIR = Path(__file__).resolve().parent.parent
+MODEL_PATH = BASE_DIR / "models" / "siagachat_url_model.joblib"
+METADATA_PATH = BASE_DIR / "models" / "siagachat_url_model_metadata.json"
+TRANCO_PATH = BASE_DIR / "data" / "tranco.csv"
 
-MODEL_PATH = (
-    BASE_DIR
-    / "models"
-    / "siagachat_url_model.joblib"
-)
+SAFE_BELOW = 30
+DANGER_FROM = 70
 
-METADATA_PATH = (
-    BASE_DIR
-    / "models"
-    / "siagachat_url_model_metadata.json"
-)
+TRUSTED_TOP_N = 10_000  # how many Tranco domains count as "popular"
+
+CAP_OFFICIAL = 10
+CAP_TRUSTED = 20
+FLOOR_TYPOSQUAT = 85
+FLOOR_PATH_BRAND = 45
+FLOOR_IP = 55
+FLOOR_SHORTENER = 40
+
+ADVICE = {
+    "Aman": (
+        "Tidak ada ciri penipuan yang terdeteksi pada nama domain. Tetap "
+        "berhati-hati: hasil ini bukan jaminan, dan isi halaman tidak diperiksa."
+    ),
+    "Waspada": (
+        "Ada beberapa tanda yang perlu dicurigai. Jangan isi data pribadi, OTP, "
+        "atau PIN. Buka situs resminya langsung lewat aplikasi atau pencarian."
+    ),
+    "Bahaya": (
+        "Jangan klik, jangan isi data apa pun, dan jangan install file dari "
+        "link ini. Jika sudah terlanjur, segera hubungi bank atau layanan "
+        "resminya lewat kanal resmi dan ganti password."
+    ),
+}
 
 
 # ============================================================
-# THRESHOLDS
+# LOADING (cached: loaded once, not on every prediction)
 # ============================================================
 
-SAFE_THRESHOLD = 30
-WARNING_THRESHOLD = 70
-
-
-# ============================================================
-# LOAD MODEL
-# ============================================================
-
-def load_model_package():
-    """Load trained model package."""
-
-    if not MODEL_PATH.exists():
-
+@lru_cache(maxsize=1)
+def _load_model():
+    if not MODEL_PATH.exists() or not METADATA_PATH.exists():
         raise FileNotFoundError(
-            f"Model tidak ditemukan:\n"
-            f"{MODEL_PATH}\n\n"
-            f"Jalankan:\n"
-            f"python -m src.train"
+            "Model not found. Run: python -m src.prepare_data  then  "
+            "python -m src.train"
         )
 
     package = joblib.load(MODEL_PATH)
+    metadata = json.loads(METADATA_PATH.read_text(encoding="utf-8"))
 
-    # --------------------------------------------------------
-    # Expected format from current train.py:
-    #
-    # {
-    #     "model": model,
-    #     "scaler": scaler
-    # }
-    # --------------------------------------------------------
-
-    if not isinstance(package, dict):
-
+    if metadata.get("feature_names") != FEATURE_NAMES:
         raise ValueError(
-            "Format model tidak dikenali.\n"
-            "Model harus dibuat menggunakan train.py terbaru."
+            "The saved model was trained with different features than "
+            "features.py. Run prepare_data and train again."
         )
+    return package["model"], package.get("scaler"), metadata
 
-    if "model" not in package:
 
-        raise ValueError(
-            "Model package tidak memiliki key 'model'."
-        )
-
-    model = package["model"]
-    scaler = package.get("scaler")
-
-    return model, scaler
+@lru_cache(maxsize=1)
+def _trusted_domains() -> frozenset:
+    """Top Tranco domains, if data/tranco.csv exists."""
+    if not TRANCO_PATH.exists():
+        return frozenset()
+    raw = pd.read_csv(TRANCO_PATH, header=None, dtype=str).dropna()
+    domains = raw.iloc[:, -1].astype(str).str.strip().str.lower()
+    return frozenset(domains[domains != "domain"].head(TRUSTED_TOP_N))
 
 
 # ============================================================
-# LOAD METADATA
+# MODEL SCORE
 # ============================================================
 
-def load_metadata() -> dict:
-    """Load model metadata."""
-
-    if not METADATA_PATH.exists():
-
-        raise FileNotFoundError(
-            f"Metadata tidak ditemukan:\n"
-            f"{METADATA_PATH}\n\n"
-            f"Jalankan training ulang dengan:\n"
-            f"python -m src.train"
-        )
-
-    with open(
-        METADATA_PATH,
-        "r",
-        encoding="utf-8",
-    ) as file:
-
-        metadata = json.load(file)
-
-    return metadata
-
-
-# ============================================================
-# VALIDATE METADATA
-# ============================================================
-
-def validate_metadata(metadata: dict) -> list[str]:
-    """Validate feature schema from metadata."""
-
-    if "feature_names" not in metadata:
-
-        raise ValueError(
-            "Metadata tidak memiliki 'feature_names'.\n"
-            "Gunakan metadata yang dibuat oleh train.py terbaru."
-        )
-
-    feature_names = metadata["feature_names"]
-
-    if not isinstance(feature_names, list):
-
-        raise ValueError(
-            "'feature_names' pada metadata harus berupa list."
-        )
-
-    # --------------------------------------------------------
-    # Ensure prediction schema matches features.py
-    # --------------------------------------------------------
-
-    if feature_names != FEATURE_NAMES:
-
-        raise ValueError(
-            "Feature schema tidak sinkron!\n\n"
-            f"Metadata:\n{feature_names}\n\n"
-            f"features.py:\n{FEATURE_NAMES}\n\n"
-            "Pastikan features.py dan model berasal "
-            "dari versi pipeline yang sama."
-        )
-
-    return feature_names
-
-
-# ============================================================
-# PREPARE INPUT
-# ============================================================
-
-def prepare_input(
-    url: str,
-    feature_names: list[str],
-) -> pd.DataFrame:
-    """
-    Extract features and create a pandas DataFrame.
-
-    Using DataFrame preserves feature names and order.
-    """
-
+def model_score(url: str) -> float:
+    """Malicious probability from the ML model, 0-100."""
+    model, scaler, _ = _load_model()
     features = extract_features(url)
-
-    # --------------------------------------------------------
-    # Validate all required features exist
-    # --------------------------------------------------------
-
-    missing = [
-        name
-        for name in feature_names
-        if name not in features
-    ]
-
-    if missing:
-
-        raise ValueError(
-            "Feature extraction tidak lengkap.\n"
-            f"Missing features: {missing}"
-        )
-
-    # --------------------------------------------------------
-    # Ignore anything outside the official schema.
-    # --------------------------------------------------------
-
-    values = {
-        name: features[name]
-        for name in feature_names
-    }
-
-    # --------------------------------------------------------
-    # IMPORTANT:
-    # DataFrame prevents sklearn feature-name warning.
-    # --------------------------------------------------------
-
-    X = pd.DataFrame(
-        [values],
-        columns=feature_names,
-    )
-
-    return X
+    X = pd.DataFrame([features], columns=FEATURE_NAMES)
+    X_in = scaler.transform(X) if scaler is not None else X
+    proba = model.predict_proba(X_in)[0][list(model.classes_).index(1)]
+    return float(proba) * 100.0
 
 
 # ============================================================
-# GET MALICIOUS PROBABILITY
+# RULE LAYER
 # ============================================================
 
-def get_malicious_probability(
-    model,
-    scaler,
-    X: pd.DataFrame,
-) -> float:
-    """
-    Get probability for class 1 = malicious.
-    """
-
-    # --------------------------------------------------------
-    # Logistic Regression
-    #
-    # Needs StandardScaler.
-    # --------------------------------------------------------
-
-    if scaler is not None:
-
-        X_input = scaler.transform(X)
-
-    else:
-
-        # ----------------------------------------------------
-        # Random Forest
-        #
-        # Keep DataFrame so feature names remain available.
-        # ----------------------------------------------------
-
-        X_input = X
-
-    # --------------------------------------------------------
-    # Predict probability
-    # --------------------------------------------------------
-
-    probabilities = model.predict_proba(
-        X_input
-    )
-
-    # --------------------------------------------------------
-    # Find class index dynamically.
-    #
-    # Do NOT blindly use probabilities[0][1].
-    # --------------------------------------------------------
-
-    if not hasattr(model, "classes_"):
-
-        raise ValueError(
-            "Model tidak memiliki classes_."
-        )
-
-    classes = list(model.classes_)
-
-    if 1 not in classes:
-
-        raise ValueError(
-            f"Model tidak memiliki class 1.\n"
-            f"Classes: {classes}"
-        )
-
-    malicious_index = classes.index(1)
-
-    malicious_probability = float(
-        probabilities[0][malicious_index]
-    )
-
-    return malicious_probability
-
-
-# ============================================================
-# RISK LABEL
-# ============================================================
-
-def risk_label(score: float) -> str:
-    """Convert probability score into human-readable label."""
-
-    if score < SAFE_THRESHOLD:
-
+def _label(score: float) -> str:
+    if score < SAFE_BELOW:
         return "Aman"
-
-    if score < WARNING_THRESHOLD:
-
+    if score < DANGER_FROM:
         return "Waspada"
-
     return "Bahaya"
 
 
+def _is_bare_popular(parsed: dict) -> bool:
+    """
+    Popular domain AND no extra subdomain. 'evil.blogspot.com' is not trusted
+    just because 'blogspot.com' is popular.
+    """
+    return (
+        parsed["host_clean"] == parsed["registered"]
+        and parsed["registered"] in _trusted_domains()
+    )
+
+
+def apply_rules(score: float, url: str) -> tuple[float, list[str], list[str]]:
+    """Return (adjusted score, rule reasons, rules fired)."""
+    parsed = parse_url(url)
+    brand = analyze_brand(url)
+    features = extract_features(url)
+
+    reasons: list[str] = []
+    fired: list[str] = []
+
+    if brand["is_official"]:
+        fired.append("official_domain")
+        reasons.append(
+            f"Domain {parsed['registered']} terdaftar sebagai domain resmi."
+        )
+        return min(score, CAP_OFFICIAL), reasons, fired
+
+    if has_trusted_suffix(parsed["host_clean"]):
+        fired.append("trusted_suffix")
+        reasons.append(
+            "Akhiran domain (.go.id / .mil.id) hanya bisa dimiliki instansi "
+            "pemerintah atau militer."
+        )
+        return min(score, CAP_TRUSTED), reasons, fired
+
+    if brand["is_typosquatting"]:
+        fired.append("brand_impersonation")
+        return max(score, FLOOR_TYPOSQUAT), reasons, fired
+
+    if _is_bare_popular(parsed):
+        fired.append("popular_domain")
+        reasons.append(
+            f"{parsed['registered']} termasuk situs yang sangat populer. "
+            "Yang diperiksa hanya nama domain, bukan isi halamannya."
+        )
+        return min(score, CAP_TRUSTED), reasons, fired
+
+    if brand["brand_in_path"] and features["suspicious_word_count"] > 0:
+        fired.append("brand_in_path")
+        score = max(score, FLOOR_PATH_BRAND)
+    if features["is_ip"]:
+        fired.append("ip_host")
+        score = max(score, FLOOR_IP)
+    if features["is_shortener"]:
+        fired.append("shortener")
+        score = max(score, FLOOR_SHORTENER)
+
+    return score, reasons, fired
+
+
 # ============================================================
-# PREDICT URL
+# PUBLIC API
 # ============================================================
 
 def predict_url(url: str) -> dict:
-    """Analyze a URL."""
-
+    """Analyse one URL. Raises ValueError for unusable input."""
     url = str(url).strip()
-
     if not url:
+        raise ValueError("URL tidak boleh kosong.")
 
-        raise ValueError(
-            "URL tidak boleh kosong."
+    base = model_score(url)
+    final, rule_reasons, fired = apply_rules(base, url)
+    final = round(max(0.0, min(100.0, final)), 2)
+    label = _label(final)
+
+    reasons = rule_reasons + explain_features(url)
+
+    # Keep reasons consistent with the verdict.
+    if label == "Aman" and not reasons:
+        reasons.append("Tidak ditemukan ciri mencurigakan pada nama domain.")
+    if label != "Aman" and not any(
+        r for r in reasons if not r.startswith(("Domain ", "Akhiran domain "))
+    ):
+        reasons.append(
+            "Pola nama domain mirip data penipuan yang dipelajari model, "
+            "meski tidak ada ciri tunggal yang menonjol."
         )
-
-    # --------------------------------------------------------
-    # Load model + metadata
-    # --------------------------------------------------------
-
-    model, scaler = load_model_package()
-
-    metadata = load_metadata()
-
-    feature_names = validate_metadata(
-        metadata
-    )
-
-    # --------------------------------------------------------
-    # Extract features
-    # --------------------------------------------------------
-
-    X = prepare_input(
-        url,
-        feature_names,
-    )
-
-    # --------------------------------------------------------
-    # Predict
-    # --------------------------------------------------------
-
-    malicious_probability = (
-        get_malicious_probability(
-            model,
-            scaler,
-            X,
-        )
-    )
-
-    # --------------------------------------------------------
-    # Convert to 0-100
-    # --------------------------------------------------------
-
-    risk_score = round(
-        malicious_probability * 100,
-        2,
-    )
-
-    label = risk_label(
-        risk_score
-    )
-
-    # --------------------------------------------------------
-    # Explanation
-    # --------------------------------------------------------
-
-    reasons = explain_features(
-        url
-    )
 
     return {
         "url": url,
-        "risk_score": risk_score,
+        "risk_score": final,
+        "model_score": round(base, 2),
         "label": label,
-        "malicious_probability": malicious_probability,
         "reasons": reasons,
-        "features": X.iloc[0].to_dict(),
-        "model_type": metadata.get(
-            "model_type",
-            "unknown",
-        ),
+        "rules_fired": fired,
+        "advice": ADVICE[label],
     }
 
 
-# ============================================================
-# PRINT RESULT
-# ============================================================
-
-def print_result(result: dict) -> None:
-    """Print prediction result."""
-
+def _print(result: dict) -> None:
     print()
-    print("=" * 60)
-    print("SiagaChat Analysis Result")
-    print("=" * 60)
-
-    print()
-    print(f"URL   : {result['url']}")
-    print(f"Status: {result['label']}")
-    print(
-        f"Score : {result['risk_score']:.2f}/100"
-    )
-
-    print(
-        f"Model : {result['model_type']}"
-    )
-
-    print()
-
-    print("-" * 60)
-    print("Reasons")
-    print("-" * 60)
-
-    reasons = result["reasons"]
-
-    if reasons:
-
-        for reason in reasons:
-            print(f"  • {reason}")
-
-    else:
-
-        print(
-            "  • Tidak ditemukan indikasi mencurigakan "
-            "berdasarkan rule explanation."
-        )
-
-    print()
-
-    print("-" * 60)
-    print("ML Features")
-    print("-" * 60)
-
-    features = result["features"]
-
-    for name, value in features.items():
-
-        if isinstance(value, float):
-
-            print(
-                f"  {name:<25}: {value:.4f}"
-            )
-
-        else:
-
-            print(
-                f"  {name:<25}: {value}"
-            )
-
-    print()
-    print("=" * 60)
-    print()
+    print("=" * 62)
+    print(f"URL     : {result['url']}")
+    print(f"Status  : {result['label']}   (skor {result['risk_score']}/100)")
+    print(f"Model   : {result['model_score']}   Aturan: {result['rules_fired'] or '-'}")
+    print("Alasan:")
+    for reason in result["reasons"]:
+        print(f"  - {reason}")
+    print(f"Saran   : {result['advice']}")
+    print("=" * 62)
 
 
-# ============================================================
-# INTERACTIVE MODE
-# ============================================================
-
-def main():
-
-    print("=" * 60)
-    print("SiagaChat URL Predictor")
-    print("=" * 60)
-
-    print()
-    print(
-        "Enter a URL to analyze "
-        "(or 'quit' to exit):"
-    )
-    print()
-
+def main() -> None:
+    print("SiagaChat URL checker. Ketik 'q' untuk keluar.")
     while True:
-
         try:
-
-            url = input("URL: ").strip()
-
-        except (
-            KeyboardInterrupt,
-            EOFError,
-        ):
-
-            print()
-            print("Exiting SiagaChat...")
+            url = input("\nURL: ").strip()
+        except (KeyboardInterrupt, EOFError):
             break
-
-        if url.lower() in {
-            "quit",
-            "exit",
-            "q",
-        }:
-
-            print("Exiting SiagaChat...")
+        if url.lower() in {"q", "quit", "exit"}:
             break
-
         if not url:
-
             continue
-
         try:
-
-            result = predict_url(
-                url
-            )
-
-            print_result(
-                result
-            )
-
+            _print(predict_url(url))
         except Exception as exc:
+            print(f"Error: {exc}")
 
-            print()
-            print(
-                f"Error: {exc}"
-            )
-            print()
-
-
-# ============================================================
-# ENTRY POINT
-# ============================================================
 
 if __name__ == "__main__":
     main()
