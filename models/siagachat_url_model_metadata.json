@@ -1,52 +1,46 @@
 {
-    "model_type": "random_forest",
-    "feature_names": [
-        "url_length",
-        "domain_length",
-        "path_length",
-        "num_dots",
-        "num_hyphens",
-        "num_at",
-        "num_question",
-        "num_equals",
-        "num_ampersand",
-        "num_percent",
-        "num_digits",
-        "num_non_alphanum",
-        "num_subdomains",
-        "is_ip",
-        "suspicious_word_count",
-        "is_shortener",
-        "is_suspicious_tld",
-        "domain_entropy",
-        "digit_ratio",
-        "is_typosquatting",
-        "max_brand_similarity"
-    ],
-    "feature_count": 21,
-    "classes": [
-        0,
-        1
-    ],
-    "label_mapping": {
-        "0": "benign",
-        "1": "malicious"
-    },
-    "random_state": 42,
-    "metrics": {
-        "accuracy": 0.9189490091293698,
-        "precision": 0.8685565894827959,
-        "recall": 0.8995472679187771,
-        "f1": 0.8837803320561941
-    },
-    "dataset": {
-        "train_rows": 520952,
-        "test_rows": 130239
-    },
-    "random_forest_config": {
-        "n_estimators": 100,
-        "max_depth": 20,
-        "min_samples_leaf": 2,
-        "class_weight": "balanced"
+  "model_type": "random_forest",
+  "feature_names": [
+    "host_length",
+    "domain_name_length",
+    "longest_label_length",
+    "subdomain_count",
+    "num_dots_host",
+    "num_hyphens_host",
+    "num_digits_host",
+    "digit_ratio_host",
+    "domain_entropy",
+    "max_consonant_run",
+    "is_ip",
+    "is_shortener",
+    "is_suspicious_tld",
+    "suspicious_word_count",
+    "has_at",
+    "has_punycode",
+    "has_port"
+  ],
+  "classes": [
+    0,
+    1
+  ],
+  "label_mapping": {
+    "0": "benign",
+    "1": "malicious"
+  },
+  "metrics": {
+    "accuracy": 0.7081108781737713,
+    "precision": 0.3500889679715303,
+    "recall": 0.45340128517615774,
+    "f1": 0.3951032072447817,
+    "confusion": {
+      "true_benign": 65767,
+      "false_alarm": 18993,
+      "missed_scam": 12334,
+      "caught_scam": 10231
     }
+  },
+  "split": "grouped by registered domain (no domain in both train and test)",
+  "train_rows": 480301,
+  "test_rows": 107325,
+  "trained_at": "2026-10-03T21:20:21+00:00"
 }
