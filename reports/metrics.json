@@ -1,35 +1,27 @@
 {
-  "RandomForest": {
-    "accuracy": 0.9285197365407694,
-    "precision": 0.8132436627004656,
-    "recall": 0.8679181177270024,
-    "f1_score": 0.8396918335901387,
-    "confusion_matrix": [
-      [
-        80924,
-        4693
-      ],
-      [
-        3110,
-        20436
-      ]
-    ]
+  "random_forest": {
+    "accuracy": 0.7081108781737713,
+    "precision": 0.3500889679715303,
+    "recall": 0.45340128517615774,
+    "f1": 0.3951032072447817,
+    "confusion": {
+      "true_benign": 65767,
+      "false_alarm": 18993,
+      "missed_scam": 12334,
+      "caught_scam": 10231
+    }
   },
-  "LogisticRegression": {
-    "accuracy": 0.7193371380412777,
-    "precision": 0.41806460557327046,
-    "recall": 0.7684107704068631,
-    "f1_score": 0.5415120316054113,
-    "confusion_matrix": [
-      [
-        60432,
-        25185
-      ],
-      [
-        5453,
-        18093
-      ]
-    ]
+  "logistic_regression": {
+    "accuracy": 0.7206801770323783,
+    "precision": 0.35788505041984586,
+    "recall": 0.4136494571238644,
+    "f1": 0.38375200427578837,
+    "confusion": {
+      "true_benign": 68013,
+      "false_alarm": 16747,
+      "missed_scam": 13231,
+      "caught_scam": 9334
+    }
   },
-  "best_model": "RandomForest"
+  "selected": "random_forest"
 }
