@@ -1,11 +1,14 @@
 """
-SiagaChat - Streamlit UI (Stage 1: basic app).
+SiagaChat - Streamlit UI (Stage 2: action advice + EN/ID toggle).
 
 Run from the project root:
-    streamlit run app/streamlit_app.py
+    python -m streamlit run app/streamlit_app.py
 
 Safety rule: URLs are NEVER opened, downloaded or fetched.
 We only analyze the text of the URL.
+
+Note: the "reasons" returned by predict_url are still written in Indonesian.
+They will be translated in a later stage; everything else here is bilingual.
 """
 
 from __future__ import annotations
@@ -35,7 +38,7 @@ MAX_URLS = 5  # analyze at most this many links per message
 BARE_TLDS = (
     r"com|net|org|id|co\.id|or\.id|go\.id|ac\.id|sch\.id|web\.id|my\.id|"
     r"xyz|top|click|loan|work|tk|ml|ga|cf|gq|win|vip|icu|cfd|sbs|buzz|"
-    r"rest|monster|info|online|site|link|app|apk|me|co|io|cc|ly|gl|is|id"
+    r"rest|monster|info|online|site|link|app|apk|me|co|io|cc|ly|gl|is"
 )
 
 URL_PATTERN = re.compile(
@@ -64,41 +67,260 @@ def extract_urls(text: str) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
-# Demo examples (all fictional)
+# Texts (English / Indonesian)
 # ---------------------------------------------------------------------------
 
-EXAMPLES = {
-    "Contoh aman": "Tagihan bisa dicek lewat https://www.bca.co.id ya.",
-    "Contoh penipuan 1": (
-        "SELAMAT! Anda menang undian Shopee Rp5.000.000. "
-        "Klaim hadiah di shopee-hadiah-2026.top/klaim sebelum 24 jam."
-    ),
-    "Contoh penipuan 2": (
-        "Paket Anda tertahan. Cek resi dan update alamat di "
-        "http://resi-jne-paket.click/cek agar tidak dikembalikan."
-    ),
+LANGS = {"English": "en", "Bahasa Indonesia": "id"}
+
+# predict_url returns these three labels (Indonesian names are internal keys).
+LABELS = ("Aman", "Waspada", "Bahaya")
+
+TEXTS = {
+    "en": {
+        "title": "🛡️ SiagaChat",
+        "intro": (
+            "Paste a suspicious message or link. SiagaChat checks **only the "
+            "text of the link**. It never opens it."
+        ),
+        "examples_caption": "Try an example:",
+        "input_label": "Message or link",
+        "placeholder": "Example: You won a prize! Claim it at bit.ly/xxxx ...",
+        "check_button": "Check",
+        "empty_input": "Paste a message or link first.",
+        "no_links": (
+            "No links found in this text. This version only checks links, "
+            "not the message text."
+        ),
+        "too_many": "Found {total} links. Only the first {max} are checked.",
+        "link_label": "Link",
+        "score_line": "{label} (risk score {score:.0f}/100)",
+        "labels": {"Aman": "Safe", "Waspada": "Caution", "Bahaya": "Danger"},
+        "reasons_title": "Why:",
+        "reasons_note": "Detailed reasons are shown in Indonesian for now.",
+        "advice_title": "What to do",
+        "error_line": "Could not check `{url}`: {error}",
+        "disclaimer": (
+            "⚠️ Results are estimates, not certainty. If in doubt, do not "
+            "click and contact the official service."
+        ),
+        "examples": [
+            ("Safe example", "Docs are here: https://docs.python.org"),
+            (
+                "Scam example 1",
+                "Your parcel is on hold. Pay a $1.99 fee to reschedule "
+                "delivery: http://dhl-parcel-reschedule.top/pay",
+            ),
+            (
+                "Scam example 2",
+                "Your PayPal account is limited. Verify now to avoid "
+                "suspension: https://paypal-secure-login.xyz/verify",
+            ),
+        ],
+        "advice": {
+            "Aman": {
+                "summary": (
+                    "No scam signs were found in the domain name. This is not "
+                    "a guarantee, and the page content was not checked."
+                ),
+                "steps": [
+                    "Still check who sent you the link and whether you "
+                    "expected it.",
+                    "Never share OTP codes, PINs or passwords, even on sites "
+                    "that look safe.",
+                    "If something feels off, open the official site or app "
+                    "yourself instead of using the link.",
+                ],
+            },
+            "Waspada": {
+                "summary": (
+                    "Some signs look suspicious. Be careful before doing "
+                    "anything."
+                ),
+                "steps": [
+                    "Do not click the link yet.",
+                    "Do not enter personal data, OTP codes or PINs.",
+                    "Open the official site or app yourself (type the address "
+                    "or use the app) instead of using the link.",
+                    "Ask the sender through a different channel, for example "
+                    "a call to a number you already know.",
+                    "If it turns out to be a scam, report it to iasc.ojk.go.id "
+                    "or OJK Contact 157 (Indonesia).",
+                ],
+            },
+            "Bahaya": {
+                "summary": "This link looks like a scam. Do not use it.",
+                "steps": [
+                    "Do not click the link and do not forward it to others.",
+                    "Do not fill in any data, and do not install any file "
+                    "(especially APK files) from this link.",
+                    "Contact your bank or the service directly through its "
+                    "official channel (the app, or the number on your card), "
+                    "not through details in the message.",
+                    "If you already clicked or entered data: change your "
+                    "passwords right away, turn on two-step verification, and "
+                    "ask your bank to secure or block the account or card.",
+                    "Report it quickly. In Indonesia: iasc.ojk.go.id or OJK "
+                    "Contact 157 (24 hours). Funds are more likely to be "
+                    "frozen when you report early.",
+                ],
+            },
+        },
+    },
+    "id": {
+        "title": "🛡️ SiagaChat",
+        "intro": (
+            "Tempel pesan atau link yang mencurigakan. SiagaChat memeriksa "
+            "**teks link-nya saja**. Link tidak pernah dibuka."
+        ),
+        "examples_caption": "Coba contoh:",
+        "input_label": "Pesan atau link",
+        "placeholder": "Contoh: Selamat anda menang hadiah, klik bit.ly/xxxx ...",
+        "check_button": "Periksa",
+        "empty_input": "Tempel pesan atau link dulu ya.",
+        "no_links": (
+            "Tidak ada link yang ditemukan di teks ini. Versi ini baru "
+            "memeriksa link, belum isi pesan."
+        ),
+        "too_many": (
+            "Ditemukan {total} link. Hanya {max} pertama yang diperiksa."
+        ),
+        "link_label": "Link",
+        "score_line": "{label} (skor risiko {score:.0f}/100)",
+        "labels": {"Aman": "Aman", "Waspada": "Waspada", "Bahaya": "Bahaya"},
+        "reasons_title": "Alasan:",
+        "reasons_note": "",
+        "advice_title": "Yang harus dilakukan",
+        "error_line": "Gagal memeriksa `{url}`: {error}",
+        "disclaimer": (
+            "⚠️ Hasil adalah perkiraan, bukan kepastian. Jika ragu, jangan "
+            "klik dan hubungi layanan resminya."
+        ),
+        "examples": [
+            ("Contoh aman", "Tagihan bisa dicek lewat https://www.bca.co.id ya."),
+            (
+                "Contoh penipuan 1",
+                "SELAMAT! Anda menang undian Shopee Rp5.000.000. Klaim "
+                "hadiah di shopee-hadiah-2026.top/klaim sebelum 24 jam.",
+            ),
+            (
+                "Contoh penipuan 2",
+                "Paket Anda tertahan. Cek resi dan update alamat di "
+                "http://resi-jne-paket.click/cek agar tidak dikembalikan.",
+            ),
+        ],
+        "advice": {
+            "Aman": {
+                "summary": (
+                    "Tidak ada ciri penipuan yang terdeteksi pada nama "
+                    "domain. Ini bukan jaminan, dan isi halaman tidak "
+                    "diperiksa."
+                ),
+                "steps": [
+                    "Tetap periksa siapa pengirim link dan apakah kamu "
+                    "memang menunggunya.",
+                    "Jangan pernah membagikan kode OTP, PIN, atau password, "
+                    "meski di situs yang tampak aman.",
+                    "Jika ada yang janggal, buka situs atau aplikasi "
+                    "resminya sendiri, jangan lewat link itu.",
+                ],
+            },
+            "Waspada": {
+                "summary": (
+                    "Ada beberapa tanda yang mencurigakan. Hati-hati sebelum "
+                    "melakukan apa pun."
+                ),
+                "steps": [
+                    "Jangan klik link-nya dulu.",
+                    "Jangan isi data pribadi, kode OTP, atau PIN.",
+                    "Buka situs atau aplikasi resminya sendiri (ketik "
+                    "alamatnya atau pakai aplikasi), jangan lewat link itu.",
+                    "Tanyakan ke pengirim lewat kanal lain, misalnya telepon "
+                    "ke nomor yang sudah kamu kenal.",
+                    "Jika ternyata penipuan, laporkan ke iasc.ojk.go.id atau "
+                    "Kontak OJK 157.",
+                ],
+            },
+            "Bahaya": {
+                "summary": (
+                    "Link ini terlihat seperti penipuan. Jangan digunakan."
+                ),
+                "steps": [
+                    "Jangan klik link-nya dan jangan teruskan ke orang lain.",
+                    "Jangan isi data apa pun, dan jangan install file "
+                    "(terutama file APK) dari link ini.",
+                    "Hubungi bank atau layanan resminya lewat kanal resmi "
+                    "(aplikasi, atau nomor di kartu kamu), bukan lewat "
+                    "kontak yang tertulis di pesan.",
+                    "Jika sudah terlanjur klik atau mengisi data: segera "
+                    "ganti password, aktifkan verifikasi dua langkah, dan "
+                    "minta bank mengamankan atau memblokir rekening atau "
+                    "kartu.",
+                    "Segera laporkan: iasc.ojk.go.id atau Kontak OJK 157 "
+                    "(24 jam). Dana lebih mungkin diblokir jika dilaporkan "
+                    "lebih awal.",
+                ],
+            },
+        },
+    },
 }
 
 
+# ---------------------------------------------------------------------------
+# Callbacks and display helpers
+# ---------------------------------------------------------------------------
+
 def load_example(text: str) -> None:
-    """Button callback: put the example text into the text box."""
+    """Button callback: put the example text in the box, clear old results."""
     st.session_state["input_text"] = text
+    st.session_state.pop("outcome", None)
 
 
-# ---------------------------------------------------------------------------
-# Result display
-# ---------------------------------------------------------------------------
+def run_check(text: str) -> dict:
+    """
+    Analyze the text and return a language-independent 'outcome' dict.
+    Results are stored in session_state, so switching language re-draws them
+    without running the model again.
+    """
+    if not text.strip():
+        return {"kind": "empty"}
 
-def show_result(result: dict) -> None:
-    """Draw one result card: colored label, score, reasons."""
+    urls = extract_urls(text)
+    if not urls:
+        return {"kind": "no_links"}
+
+    results, errors = [], []
+    for url in urls[:MAX_URLS]:
+        try:
+            results.append(predict_url(url))
+        except Exception as exc:  # keep the app alive on bad input
+            errors.append((url, str(exc)))
+
+    return {"kind": "ok", "total": len(urls), "results": results, "errors": errors}
+
+
+def show_advice(label: str, t: dict) -> None:
+    """Draw the 'what to do' block for a label."""
+    advice = t["advice"].get(label)
+    if advice is None:
+        return
+    st.markdown(f"**{t['advice_title']}**")
+    st.markdown(advice["summary"])
+    steps = "\n".join(f"{i}. {step}" for i, step in enumerate(advice["steps"], 1))
+    st.markdown(steps)
+
+
+def show_result(result: dict, t: dict, lang: str) -> None:
+    """Draw one result card: colored label, score, reasons, advice."""
     label = result["label"]
-    score = result["risk_score"]
+    score = float(result["risk_score"])
+    display = t["labels"].get(label, label)
 
     with st.container(border=True):
         # Show the URL as code so it is NOT clickable.
-        st.markdown(f"**Link:** `{result['url']}`")
+        safe_url = str(result["url"]).replace("`", "'")
+        st.markdown(f"**{t['link_label']}:** `{safe_url}`")
 
-        message = f"{label} (skor risiko {score:.0f}/100)"
+        message = t["score_line"].format(label=display, score=score)
         if label == "Aman":
             st.success(message, icon="✅")
         elif label == "Waspada":
@@ -108,9 +330,31 @@ def show_result(result: dict) -> None:
 
         st.progress(int(max(0, min(100, score))))
 
-        st.markdown("**Alasan:**")
-        for reason in result.get("reasons", []):
-            st.markdown(f"- {reason}")
+        reasons = result.get("reasons", [])
+        if reasons:
+            st.markdown(f"**{t['reasons_title']}**")
+            for reason in reasons:
+                st.markdown(f"- {reason}")
+            if t["reasons_note"]:
+                st.caption(t["reasons_note"])
+
+        st.divider()
+        show_advice(label, t)
+
+
+def show_outcome(outcome: dict, t: dict, lang: str) -> None:
+    kind = outcome["kind"]
+    if kind == "empty":
+        st.info(t["empty_input"])
+    elif kind == "no_links":
+        st.info(t["no_links"])
+    else:
+        if outcome["total"] > MAX_URLS:
+            st.caption(t["too_many"].format(total=outcome["total"], max=MAX_URLS))
+        for result in outcome["results"]:
+            show_result(result, t, lang)
+        for url, error in outcome["errors"]:
+            st.error(t["error_line"].format(url=url.replace("`", "'"), error=error))
 
 
 # ---------------------------------------------------------------------------
@@ -119,53 +363,38 @@ def show_result(result: dict) -> None:
 
 st.set_page_config(page_title="SiagaChat", page_icon="🛡️")
 
-st.title("🛡️ SiagaChat")
-st.write(
-    "Tempel pesan atau link yang mencurigakan. SiagaChat memeriksa **teks "
-    "link-nya saja**. Link tidak pernah dibuka."
-)
+# Language switch. The first option (English) is the default.
+lang_name = st.sidebar.radio("Language / Bahasa", list(LANGS), key="lang_name")
+lang = LANGS[lang_name]
+t = TEXTS[lang]
 
-st.caption("Coba contoh:")
-cols = st.columns(len(EXAMPLES))
-for col, (name, text) in zip(cols, EXAMPLES.items()):
+st.title(t["title"])
+st.write(t["intro"])
+
+st.caption(t["examples_caption"])
+cols = st.columns(len(t["examples"]))
+for col, (name, example_text) in zip(cols, t["examples"]):
     col.button(
         name,
+        key=f"example_{lang}_{name}",
         on_click=load_example,
-        args=(text,),
+        args=(example_text,),
         use_container_width=True,
     )
 
 user_text = st.text_area(
-    "Pesan atau link",
+    t["input_label"],
     key="input_text",
     height=150,
-    placeholder="Contoh: Selamat anda menang hadiah, klik bit.ly/xxxx ...",
+    placeholder=t["placeholder"],
 )
 
-if st.button("Periksa", type="primary"):
-    if not user_text.strip():
-        st.info("Tempel pesan atau link dulu ya.")
-    else:
-        urls = extract_urls(user_text)
-        if not urls:
-            st.info(
-                "Tidak ada link yang ditemukan di teks ini. Stage ini baru "
-                "memeriksa link, belum isi pesan."
-            )
-        else:
-            if len(urls) > MAX_URLS:
-                st.caption(
-                    f"Ditemukan {len(urls)} link. Hanya {MAX_URLS} pertama "
-                    "yang diperiksa."
-                )
-            for url in urls[:MAX_URLS]:
-                try:
-                    show_result(predict_url(url))
-                except Exception as exc:  # show a friendly error, keep app alive
-                    st.error(f"Gagal memeriksa `{url}`: {exc}")
+if st.button(t["check_button"], type="primary"):
+    st.session_state["outcome"] = run_check(user_text)
+
+outcome = st.session_state.get("outcome")
+if outcome:
+    show_outcome(outcome, t, lang)
 
 st.divider()
-st.caption(
-    "⚠️ Hasil adalah perkiraan, bukan kepastian. "
-    "Jika ragu, jangan klik dan hubungi layanan resminya."
-)
+st.caption(t["disclaimer"])
