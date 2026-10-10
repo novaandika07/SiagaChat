@@ -6,7 +6,7 @@ SiagaChat predictor.
 Final score = ML model score, adjusted by transparent rules:
 
     official Indonesian domain (config)      -> capped low
-    popular domain (Tranco top 10k, bare)    -> capped low
+    popular domain (Tranco top 10k) + its own subdomains -> capped low
     .go.id / .mil.id                         -> capped low
     imitates an Indonesian brand             -> raised to Bahaya
     IP address / URL shortener               -> raised to at least Waspada
@@ -22,15 +22,17 @@ from pathlib import Path
 
 import joblib
 import pandas as pd
+import tldextract
 
 from src.features import (
     FEATURE_NAMES,
     analyze_brand,
-    explain_features,
+    explain_features_items,
     extract_features,
     has_trusted_suffix,
     parse_url,
 )
+from src.messages import NEUTRAL_CODES, make, render_all
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 MODEL_PATH = BASE_DIR / "models" / "siagachat_url_model.joblib"
@@ -41,6 +43,14 @@ SAFE_BELOW = 30
 DANGER_FROM = 70
 
 TRUSTED_TOP_N = 10_000  # how many Tranco domains count as "popular"
+
+# Second extractor that also knows shared-hosting suffixes such as
+# blogspot.com or github.io. There every customer gets a subdomain, so a
+# subdomain is NOT a sign of trust. Used only for the trust rule below;
+# features.py and the trained model are untouched.
+_HOSTING_EXTRACTOR = tldextract.TLDExtract(
+    suffix_list_urls=(), cache_dir=None, include_psl_private_domains=True
+)
 
 CAP_OFFICIAL = 10
 CAP_TRUSTED = 20
@@ -125,51 +135,60 @@ def _label(score: float) -> str:
     return "Bahaya"
 
 
-def _is_bare_popular(parsed: dict) -> bool:
+def _is_trusted_popular(parsed: dict) -> bool:
     """
-    Popular domain AND no extra subdomain. 'evil.blogspot.com' is not trusted
-    just because 'blogspot.com' is popular.
+    True for a popular domain (Tranco top N) and its own subdomains, e.g.
+    docs.python.org. Subdomains on shared-hosting platforms are NOT trusted:
+    'evil.blogspot.com' is not safe just because 'blogspot.com' is popular.
     """
-    return (
-        parsed["host_clean"] == parsed["registered"]
-        and parsed["registered"] in _trusted_domains()
+    registered = parsed["registered"]
+    if registered not in _trusted_domains():
+        return False
+
+    host = parsed["host_clean"]
+    if host == registered:
+        return True
+
+    # On a shared-hosting suffix (blogspot.com, github.io, ...) this extractor
+    # treats the platform as the suffix, so the customer name becomes the
+    # registered domain and no longer equals 'registered'.
+    ext = _HOSTING_EXTRACTOR(host)
+    hosting_registered = (
+        f"{ext.domain}.{ext.suffix}" if ext.domain and ext.suffix else host
     )
+    return hosting_registered == registered
 
 
-def apply_rules(score: float, url: str) -> tuple[float, list[str], list[str]]:
-    """Return (adjusted score, rule reasons, rules fired)."""
+# ============================================================
+# RULE LAYER (continued)
+# ============================================================
+
+def apply_rules(score: float, url: str) -> tuple[float, list[dict], list[str]]:
+    """Return (adjusted score, rule reason items, rules fired)."""
     parsed = parse_url(url)
     brand = analyze_brand(url)
     features = extract_features(url)
 
-    reasons: list[str] = []
+    reasons: list[dict] = []
     fired: list[str] = []
 
     if brand["is_official"]:
         fired.append("official_domain")
-        reasons.append(
-            f"Domain {parsed['registered']} terdaftar sebagai domain resmi."
-        )
+        reasons.append(make("official_domain", domain=parsed["registered"]))
         return min(score, CAP_OFFICIAL), reasons, fired
 
     if has_trusted_suffix(parsed["host_clean"]):
         fired.append("trusted_suffix")
-        reasons.append(
-            "Akhiran domain (.go.id / .mil.id) hanya bisa dimiliki instansi "
-            "pemerintah atau militer."
-        )
+        reasons.append(make("trusted_suffix"))
         return min(score, CAP_TRUSTED), reasons, fired
 
     if brand["is_typosquatting"]:
         fired.append("brand_impersonation")
         return max(score, FLOOR_TYPOSQUAT), reasons, fired
 
-    if _is_bare_popular(parsed):
+    if _is_trusted_popular(parsed):
         fired.append("popular_domain")
-        reasons.append(
-            f"{parsed['registered']} termasuk situs yang sangat populer. "
-            "Yang diperiksa hanya nama domain, bukan isi halamannya."
-        )
+        reasons.append(make("popular_domain", domain=parsed["registered"]))
         return min(score, CAP_TRUSTED), reasons, fired
 
     if brand["brand_in_path"] and features["suspicious_word_count"] > 0:
@@ -200,25 +219,26 @@ def predict_url(url: str) -> dict:
     final = round(max(0.0, min(100.0, final)), 2)
     label = _label(final)
 
-    reasons = rule_reasons + explain_features(url)
+    items = rule_reasons + explain_features_items(url)
 
     # Keep reasons consistent with the verdict.
-    if label == "Aman" and not reasons:
-        reasons.append("Tidak ditemukan ciri mencurigakan pada nama domain.")
+    if label == "Aman" and not items:
+        items.append(make("no_signs"))
     if label != "Aman" and not any(
-        r for r in reasons if not r.startswith(("Domain ", "Akhiran domain "))
+        item["code"] not in NEUTRAL_CODES for item in items
     ):
-        reasons.append(
-            "Pola nama domain mirip data penipuan yang dipelajari model, "
-            "meski tidak ada ciri tunggal yang menonjol."
-        )
+        items.append(make("model_only"))
 
     return {
         "url": url,
         "risk_score": final,
         "model_score": round(base, 2),
         "label": label,
-        "reasons": reasons,
+        # Indonesian text, kept for the command-line checker.
+        "reasons": render_all(items, "id"),
+        # Language-neutral items: the UI renders them in the chosen language
+        # with src.messages.render().
+        "reason_items": items,
         "rules_fired": fired,
         "advice": ADVICE[label],
     }
