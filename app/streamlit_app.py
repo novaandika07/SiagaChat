@@ -7,8 +7,9 @@ Run from the project root:
 Safety rule: URLs are NEVER opened, downloaded or fetched.
 We only analyze the text of the URL.
 
-Note: the "reasons" returned by predict_url are still written in Indonesian.
-They will be translated in a later stage; everything else here is bilingual.
+Reasons come from predict_url as language-neutral items ("reason_items") and
+are rendered here with src.messages.render(), so they follow the language
+switch too.
 """
 
 from __future__ import annotations
@@ -18,6 +19,7 @@ import sys
 from pathlib import Path
 
 import streamlit as st
+import tldextract
 
 # Streamlit puts the "app/" folder on sys.path, not the project root.
 # Add the root so that "from src.predict import ..." works.
@@ -25,6 +27,7 @@ ROOT_DIR = Path(__file__).resolve().parent.parent
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
+from src.messages import render  # noqa: E402
 from src.predict import predict_url  # noqa: E402
 
 MAX_URLS = 5  # analyze at most this many links per message
@@ -33,36 +36,68 @@ MAX_URLS = 5  # analyze at most this many links per message
 # URL extraction
 # ---------------------------------------------------------------------------
 
-# Only these bare-domain endings are accepted when there is no http(s):// or
-# www. Without this limit, "Halo.Segera" would be mistaken for a domain.
-BARE_TLDS = (
-    r"com|net|org|id|co\.id|or\.id|go\.id|ac\.id|sch\.id|web\.id|my\.id|"
-    r"xyz|top|click|loan|work|tk|ml|ga|cf|gq|win|vip|icu|cfd|sbs|buzz|"
-    r"rest|monster|info|online|site|link|app|apk|me|co|io|cc|ly|gl|is"
-)
+# Checks whether the ending of a bare domain (no http://, no www.) is a real
+# top-level domain such as .com, .ai, .io or .co.id. It uses the same offline
+# public-suffix snapshot as features.py, so every real TLD works without us
+# keeping our own list. "Halo.Segera" is rejected because ".segera" is not a TLD.
+_TLD_CHECK = tldextract.TLDExtract(suffix_list_urls=(), cache_dir=None)
+
+# Real TLDs that people mostly meet as file extensions (script.py, notes.md).
+FILE_LIKE_TLDS = {"py", "md", "sh", "zip", "mov", "pl", "rs"}
 
 URL_PATTERN = re.compile(
-    r"(?:https?://[^\s<>\"']+)"                      # with scheme
-    r"|(?:www\.[^\s<>\"']+)"                         # starts with www.
-    r"|(?:(?<![@\w.\-])"                             # bare domain, not an email
-    r"(?:[a-z0-9\-]+\.)+(?:" + BARE_TLDS + r")"
-    r"(?![a-z0-9\-])(?:/[^\s<>\"']*)?)",
+    r"(?:https?://[^\s<>\"']+)"                               # with scheme
+    r"|(?:www\.[^\s<>\"']+)"                                  # starts with www.
+    r"|(?:(?<![@\w.\-/])\d{1,3}(?:\.\d{1,3}){3}"             # IPv4 address
+    r"(?::\d+)?(?:/[^\s<>\"']*)?)"
+    r"|(?:(?<![@\w.\-/])(?:[a-z0-9\-]+\.)+[a-z0-9\-]{2,}"    # bare name.tld
+    r"(?:/[^\s<>\"']*)?)",
     flags=re.IGNORECASE,
 )
 
+IPV4_RE = re.compile(r"\d{1,3}(?:\.\d{1,3}){3}")
+SINGLE_TOKEN_RE = re.compile(r"[^\s.]+(?:\.[^\s.]+)+/?\S*")
+
 TRAILING_PUNCTUATION = ".,;:!?)]}'\""
+
+
+def _is_real_bare_domain(candidate: str) -> bool:
+    """True if a scheme-less candidate ends in a real TLD (or is an IPv4)."""
+    host = candidate.split("/", 1)[0].split(":", 1)[0].lower()
+    if IPV4_RE.fullmatch(host):
+        return True
+    ext = _TLD_CHECK(host)
+    if not ext.domain or not ext.suffix:
+        return False
+    return ext.suffix.split(".")[-1] not in FILE_LIKE_TLDS
 
 
 def extract_urls(text: str) -> list[str]:
     """Return unique URLs found in text, in order of appearance."""
     found: list[str] = []
     seen: set[str] = set()
-    for match in URL_PATTERN.finditer(text):
-        url = match.group(0).rstrip(TRAILING_PUNCTUATION)
+
+    def add(url: str) -> None:
+        url = url.rstrip(TRAILING_PUNCTUATION)
         key = url.lower()
         if url and key not in seen:
             seen.add(key)
             found.append(url)
+
+    for match in URL_PATTERN.finditer(text):
+        candidate = match.group(0)
+        has_scheme = candidate.lower().startswith(("http://", "https://", "www."))
+        if has_scheme or _is_real_bare_domain(candidate.rstrip(TRAILING_PUNCTUATION)):
+            add(candidate)
+
+    # If the whole input is one word that looks like a link (for example a
+    # test domain such as login-verify.example), check it even when its ending
+    # is not a registered TLD. A bare ".ai" or "io" has no name, so it stays out.
+    if not found:
+        token = text.strip()
+        if SINGLE_TOKEN_RE.fullmatch(token):
+            add(token)
+
     return found
 
 
@@ -88,15 +123,15 @@ TEXTS = {
         "check_button": "Check",
         "empty_input": "Paste a message or link first.",
         "no_links": (
-            "No links found in this text. This version only checks links, "
-            "not the message text."
+            "No links found in this text. Paste a full link such as "
+            "paypal-login.xyz/verify, or a message that contains one. This "
+            "version only checks links, not the message text."
         ),
         "too_many": "Found {total} links. Only the first {max} are checked.",
         "link_label": "Link",
         "score_line": "{label} (risk score {score:.0f}/100)",
         "labels": {"Aman": "Safe", "Waspada": "Caution", "Bahaya": "Danger"},
         "reasons_title": "Why:",
-        "reasons_note": "Detailed reasons are shown in Indonesian for now.",
         "advice_title": "What to do",
         "error_line": "Could not check `{url}`: {error}",
         "disclaimer": (
@@ -178,8 +213,9 @@ TEXTS = {
         "check_button": "Periksa",
         "empty_input": "Tempel pesan atau link dulu ya.",
         "no_links": (
-            "Tidak ada link yang ditemukan di teks ini. Versi ini baru "
-            "memeriksa link, belum isi pesan."
+            "Tidak ada link yang ditemukan di teks ini. Tempel link "
+            "lengkap seperti paypal-login.xyz/verify, atau pesan yang "
+            "memuat link. Versi ini baru memeriksa link, belum isi pesan."
         ),
         "too_many": (
             "Ditemukan {total} link. Hanya {max} pertama yang diperiksa."
@@ -188,7 +224,6 @@ TEXTS = {
         "score_line": "{label} (skor risiko {score:.0f}/100)",
         "labels": {"Aman": "Aman", "Waspada": "Waspada", "Bahaya": "Bahaya"},
         "reasons_title": "Alasan:",
-        "reasons_note": "",
         "advice_title": "Yang harus dilakukan",
         "error_line": "Gagal memeriksa `{url}`: {error}",
         "disclaimer": (
@@ -330,13 +365,15 @@ def show_result(result: dict, t: dict, lang: str) -> None:
 
         st.progress(int(max(0, min(100, score))))
 
-        reasons = result.get("reasons", [])
+        items = result.get("reason_items")
+        if items is not None:
+            reasons = [render(item, lang) for item in items]
+        else:  # older predict.py without reason_items: Indonesian text only
+            reasons = result.get("reasons", [])
         if reasons:
             st.markdown(f"**{t['reasons_title']}**")
             for reason in reasons:
                 st.markdown(f"- {reason}")
-            if t["reasons_note"]:
-                st.caption(t["reasons_note"])
 
         st.divider()
         show_advice(label, t)
