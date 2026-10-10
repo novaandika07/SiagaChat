@@ -30,6 +30,7 @@ import tldextract
 from rapidfuzz import fuzz, process
 
 from src import config
+from src.messages import make, render_all
 
 # Offline extractor: uses the public-suffix snapshot bundled with tldextract,
 # so no network access (and no random failures) during bulk processing.
@@ -313,60 +314,62 @@ def analyze_brand(url: str) -> dict:
 
 
 # ============================================================
-# HUMAN-READABLE EXPLANATION (Indonesian)
+# HUMAN-READABLE EXPLANATION (English + Indonesian)
 # ============================================================
+# Reasons are built as language-neutral items {"code": ..., "params": ...}.
+# src/messages.py turns them into text, so the UI can show English or
+# Indonesian without running the model again. Scores never depend on this.
 
-def explain_features(url: str) -> list[str]:
-    """List of plain-Indonesian reasons why a URL looks suspicious."""
-    reasons: list[str] = []
+def explain_features_items(url: str) -> list[dict]:
+    """Language-neutral reasons why a URL looks suspicious."""
+    items: list[dict] = []
 
     try:
         p = parse_url(url)
         feats = extract_features(url)
         brand = analyze_brand(url)
     except ValueError:
-        return ["Format link tidak standar sehingga sulit dianalisis."]
+        return [make("unparsable_url")]
 
     host = p["host_clean"]
 
     if brand["is_typosquatting"]:
         name = brand["brand"]
         official = config.OFFICIAL_DOMAINS.get(name, [])
-        hint = f" (alamat resmi: {official[0]})" if official else ""
-        reasons.append(
-            f"Nama '{name}' dipakai pada domain '{p['registered']}' yang "
-            f"bukan domain resmi{hint}. Ini ciri khas penipuan yang menyamar."
-        )
+        if official:
+            items.append(
+                make(
+                    "brand_impersonation_official",
+                    name=name,
+                    domain=p["registered"],
+                    official=official[0],
+                )
+            )
+        else:
+            items.append(
+                make("brand_impersonation", name=name, domain=p["registered"])
+            )
     elif brand["brand_in_path"] and feats["suspicious_word_count"] > 0:
-        reasons.append(
-            f"Nama '{brand['brand']}' muncul di alamat halaman, tetapi domain "
-            f"'{p['registered']}' bukan milik mereka."
+        items.append(
+            make(
+                "brand_in_path",
+                brand=brand["brand"],
+                domain=p["registered"],
+            )
         )
 
     if feats["is_ip"]:
-        reasons.append(
-            "Link memakai alamat IP, bukan nama situs. Situs resmi hampir "
-            "tidak pernah begini."
-        )
+        items.append(make("ip_host"))
     if feats["is_shortener"]:
-        reasons.append(
-            "Link dipendekkan sehingga tujuan aslinya tersembunyi."
-        )
+        items.append(make("shortener"))
     if feats["is_suspicious_tld"]:
-        tld = p["ext"].suffix.split(".")[-1]
-        reasons.append(
-            f"Akhiran domain .{tld} sering dipakai untuk situs penipuan "
-            "murah."
+        items.append(
+            make("suspicious_tld", tld=p["ext"].suffix.split(".")[-1])
         )
     if feats["has_at"]:
-        reasons.append(
-            "Ada simbol '@' di alamat, yang bisa menyamarkan tujuan sebenarnya."
-        )
+        items.append(make("has_at"))
     if feats["has_punycode"]:
-        reasons.append(
-            "Domain memakai karakter khusus (punycode) yang bisa menyerupai "
-            "huruf biasa."
-        )
+        items.append(make("punycode"))
 
     if feats["suspicious_word_count"] > 0:
         tokens = set(_TOKEN_RE.split(p["no_scheme"]))
@@ -376,28 +379,29 @@ def explain_features(url: str) -> list[str]:
             if w.lower() in tokens
             or (len(w) >= 6 and w.lower() in p["no_scheme"])
         ]
-        reasons.append(
-            "Mengandung kata yang sering dipakai penipu: "
-            + ", ".join(found[:4])
-            + "."
-        )
+        items.append(make("suspicious_words", words=", ".join(found[:4])))
 
     if feats["subdomain_count"] >= 3:
-        reasons.append("Alamat memiliki terlalu banyak lapisan subdomain.")
+        items.append(make("many_subdomains"))
     if feats["num_hyphens_host"] >= 3:
-        reasons.append("Nama domain memuat banyak tanda hubung.")
+        items.append(make("many_hyphens"))
     if (
         feats["domain_name_length"] >= 10
         and feats["domain_entropy"] >= 3.4
         and feats["max_consonant_run"] >= 5
     ):
-        reasons.append("Nama domain tampak acak, bukan nama merek atau kata.")
+        items.append(make("random_name"))
     if feats["digit_ratio_host"] >= 0.3 and not p["is_ip"]:
-        reasons.append("Nama domain banyak berisi angka.")
+        items.append(make("many_digits"))
     if len(host) >= 40:
-        reasons.append("Nama domain sangat panjang.")
+        items.append(make("long_domain"))
 
-    return reasons
+    return items
+
+
+def explain_features(url: str, lang: str = "id") -> list[str]:
+    """Reasons as text (default Indonesian, same as before)."""
+    return render_all(explain_features_items(url), lang)
 
 
 # ============================================================
@@ -433,6 +437,8 @@ def _self_test() -> None:
     assert a == c, "scheme/www must not change features"
 
     assert len(explain_features("http://bca-secure-login.xyz")) >= 2
+    en = explain_features("http://bca-secure-login.xyz", "en")
+    assert len(en) >= 2 and all(r.isascii() for r in en), en
 
     try:
         extract_features("")
