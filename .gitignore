@@ -1,9 +1,22 @@
-venv/
+# Python
 __pycache__/
 *.pyc
+.venv/
+venv/
+
+# Secrets: never commit these
 .env
 .streamlit/secrets.toml
-data/*.csv
-data/*.zip
+
+# Raw / generated data (large, and the Kaggle file should not be redistributed)
+data/malicious_phish.csv
+data/train.csv
+data/test.csv
+
+# data/tranco.csv is NOT ignored: predict.py needs it for the "popular domain"
+# rule. If it is bigger than ~50 MB, add it here and tell users to download it.
+
+# OS / editor
+.DS_Store
+Thumbs.db
 .vscode/
-models/*.joblib
