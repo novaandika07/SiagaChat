@@ -129,4 +129,4 @@ We used AI assistants (Claude, ChatGPT and Qwen) for brainstorming, drafting and
 
 Kaggle *Malicious URLs dataset*, the Tranco list, scikit-learn, tldextract, RapidFuzz and Streamlit.
 
-Built during ForgeHacks 2026 by [your name / team].
+Built during ForgeHacks 2026 by Nova Andika.
